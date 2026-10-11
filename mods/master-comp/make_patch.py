@@ -1,9 +1,10 @@
 """Genera mods/master-comp/patch.json: compressore sui VCA del master (vedi README.md).
 
-    python mods/master-comp/make_patch.py [--thr 0x4000 --atk 0x1800 --rel 0x2000 --mup 0x2000 --rat 4]
+    python mods/master-comp/make_patch.py [--os 1.42] [--thr 0x4000 --atk 0x1800 --rel 0x2000 --mup 0x2000 --rat 4]
 
 Valori di default delle manopole (0..0x7F00) e ratio di default quando acceso (1..8).
-Tabelle e costanti da dsp.py (formule, nessun dato Elektron). Richiede binutils m68k in WSL.
+Tabelle e costanti da dsp.py (formule, nessun dato Elektron). Binutils m68k: WSL o nativi (tools/build/m68k.py).
+Indirizzi scritti per l'OS 1.41, spostati per le altre versioni da tools/build/osver.py.
 """
 
 from __future__ import annotations
@@ -14,7 +15,6 @@ import json
 import re
 import shutil
 import struct
-import subprocess
 import sys
 import tempfile
 import importlib.util
@@ -22,8 +22,10 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
-sys.path[:0] = [str(REPO / "tools" / "unpack"), str(HERE)]
+sys.path[:0] = [str(REPO / "tools" / "unpack"), str(REPO / "tools" / "build"), str(HERE)]
 import eft  # noqa: E402
+import m68k  # noqa: E402
+import osver  # noqa: E402
 from dsp import ATTACK, C_OCT, EXP_T, LOG_T, RATIO, RELEASE  # noqa: E402
 _vp = importlib.util.spec_from_file_location("vparams_make_patch", REPO / "mods" / "vparams" / "make_patch.py")
 vparams = importlib.util.module_from_spec(_vp)
@@ -68,7 +70,7 @@ def fmt_include() -> str:
 
 LOAD = 0x4000_0400
 # area mod (mods/modarea): collegato in RAM a 0x46000000, byte accodati alla sezione 3 a 0x40348000
-MODAREA_RAM, MODAREA_IMG, MODAREA_SIZE = 0x4600_0000, 0x4034_8000, 0x8000
+MODAREA_RAM, MODAREA_SIZE = 0x4600_0000, 0x8000    # immagine: osver.LAYOUT[os]["img"]
 CODE_BASE = MODAREA_RAM + 0x0000        # offset 0 dell'area mod
 FREE_END = MODAREA_RAM + MODAREA_SIZE
 HOOK, HOOK_END = 0x4009_053E, 0x4009_0562
@@ -98,18 +100,10 @@ INIT_FIX = [(0x4018_B986, "41b9d660", "41b9d670", "id 91 +68: renderer clessidra
             (0x4018_AF06, "41b9d5b0", "41b9d5d0", "id 59 (GR) +68: manopola -> barra (come IN LR)")]
 RAT_STEP = 0xFE0
 PAGE_HOOK, PAGE_ORIG = 0x4019_5156, "42b941b9f968"      # clr.l 0x41B9F968 (ultima casella vuota, all'avvio)
-WSL_BINUTILS = "~/tools/m68k/root"
 
 
 def sha(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
-
-
-def wsl(cmd: str) -> str:
-    r = subprocess.run(["wsl.exe", "-e", "bash", "-lc", cmd], capture_output=True, text=True)
-    if r.returncode:
-        raise SystemExit(f"comando WSL fallito:\n{cmd}\n{r.stderr}")
-    return r.stdout
 
 
 def build_blob(defs: dict[str, int], incs: dict[str, str]) -> tuple[bytes, dict[str, int], list[int], str]:
@@ -118,18 +112,13 @@ def build_blob(defs: dict[str, int], incs: dict[str, str]) -> tuple[bytes, dict[
         shutil.copy(HERE / "comp.S", tmp / "comp.S")
         for name, text in incs.items():
             (tmp / name).write_text(text, encoding="ascii")
-        w = eft.to_wsl_path(tmp)
-        bu = f"R={WSL_BINUTILS}; export LD_LIBRARY_PATH=$R/usr/lib/x86_64-linux-gnu; cd {w}; "
+        bu = m68k.Binutils(tmp)
         sym = " ".join(f"--defsym {k}={v & 0xFFFFFFFF}" for k, v in defs.items())
-        wsl(bu + f"$R/usr/bin/m68k-linux-gnu-as -mcpu=54418 {sym} comp.S -o c.o")
-        wsl(bu + f"$R/usr/bin/m68k-linux-gnu-ld -N -Ttext={CODE_BASE:#x} -o c.elf c.o")
-        wsl(bu + "$R/usr/bin/m68k-linux-gnu-objcopy -O binary c.elf c.bin")
-        syms = {}
-        for line in wsl(bu + "$R/usr/bin/m68k-linux-gnu-nm c.elf").splitlines():
-            parts = line.split()
-            if len(parts) == 3:
-                syms[parts[2]] = int(parts[0], 16)
-        dis = wsl(bu + "$R/usr/bin/m68k-linux-gnu-objdump -d -m m68k:isa-c:emac c.elf")
+        bu.run(f"as -mcpu=54418 {sym} comp.S -o c.o")
+        bu.run(f"ld -N -Ttext={CODE_BASE:#x} -o c.elf c.o")
+        bu.run("objcopy -O binary c.elf c.bin")
+        syms = bu.symbols("c.elf")
+        dis = bu.run("objdump -d -m m68k:isa-c:emac c.elf")
         blob = (tmp / "c.bin").read_bytes()
     emac = []
     for m in re.finditer(r"^\s*([0-9a-f]+):\s+(?:[0-9a-f]{4} ?)+\s+(\S+)\s*(.*)$", dis, re.M):
@@ -143,14 +132,20 @@ def main() -> None:
     for k, v in (("thr", 0x4000), ("atk", 0x1800), ("rel", 0x2000), ("mup", 0x2000)):
         ap.add_argument(f"--{k}", type=lambda s: int(s, 0), default=v)
     ap.add_argument("--rat", type=int, default=4, help="ratio di default quando acceso (1..8)")
+    ap.add_argument("--os", default="1.41", choices=osver.versions())
     ap.add_argument("--no-drive-knob", action="store_true",
                     help="non copiare il disegno della manopola di DRIVE su THR..MUP")
     a = ap.parse_args()
+    os_ = a.os
+    C = lambda x: osver.code(x, os_)                    # indirizzi 1.41 -> OS scelto
+    B = lambda x: osver.bss(x, os_)
+    MODAREA_IMG = osver.LAYOUT[os_]["img"]
+    hook, hook_end, desc, page_hook = C(HOOK), C(HOOK_END), C(DESC), C(PAGE_HOOK)
     params = [a.thr, a.atk, a.rel, a.mup, a.rat]
 
     # salvataggio: 4 parole = valore XOR default (15 bit) + un bit di RAT ciascuna; zero = default, spento
     defs = {"C_OCT": C_OCT, "D_THR": a.thr, "D_ATK": a.atk, "D_REL": a.rel, "D_MUP": a.mup,
-            "GFX_ON": 0 if a.no_drive_knob else 1}
+            "GFX_ON": 0 if a.no_drive_knob else 1, "BSS_D": osver.LAYOUT[os_]["bss_delta"]}
     defs.update({f"ID_{n}": i for n, _, i, _ in PARAMS})
     nl = "\n"
     tables = "".join(f"        .long   {', '.join(str(v) for v in tab[k:k + 8])}{nl}"
@@ -161,16 +156,16 @@ def main() -> None:
     defs.update({f"LOG_T{i}": v for i, v in enumerate(LOG_T)})
     defs.update({f"EXP_T{i}": v for i, v in enumerate(EXP_T)})
 
-    stock = REPO / "firmware" / "Syntakt_OS1.41.syx"
+    stock = REPO / "firmware" / f"Syntakt_OS{os_}.syx"
     sec3 = eft.unpack(stock, REPO / "unpacked" / stock.stem, ids=[3])[3].read_bytes()
     blob, syms, emac, dis = build_blob(defs, incs)
     end = CODE_BASE + len(blob)
     if end > FREE_END:
         raise SystemExit(f"non ci sta: {len(blob)} B (liberi {FREE_END - CODE_BASE})")
-    site = sec3[HOOK - LOAD:HOOK_END - LOAD]
+    site = sec3[hook - LOAD:hook_end - LOAD]
     if site.hex() != HOOK_ORIG:
         raise SystemExit("i byte del punto d'aggancio non sono quelli attesi")
-    tramp = struct.pack(">HIHH", 0x4EB9, syms["comp_hook"], 0x6000, HOOK_END - (HOOK + 8))
+    tramp = struct.pack(">HIHH", 0x4EB9, syms["comp_hook"], 0x6000, hook_end - (hook + 8))
 
     def fixed(addr: int, new: bytes, what: str, expect: str | None = None) -> dict:
         old = sec3[addr - LOAD:addr - LOAD + len(new)]
@@ -181,20 +176,23 @@ def main() -> None:
 
     ui = []
     for slot, (n, _, i, _) in enumerate(PARAMS):      # parametri virtuali (mods/vparams), posti 0..6
-        ui.append(vparams.entry(VP_SLOT0 + slot, i, syms["get_hook"], syms["set_hook"], f"master-comp {n}"))
+        ui.append(vparams.entry(VP_SLOT0 + slot, i, syms["get_hook"], syms["set_hook"], f"master-comp {n}", os_))
     defaults = {"THR": a.thr, "ATK": a.atk, "REL": a.rel, "MUP": a.mup, "RAT": a.rat * RAT_STEP, "GR": 0, "COMP": 0x100}
     for n, ln, i, mx in PARAMS:
-        r = DESC + 52 * i
+        r = desc + 52 * i
         ui.append(fixed(r + 8, struct.pack(">III", 0, mx, defaults[n]), f"id {i} -> {n}: min, max, default"))
         ui.append(fixed(r + 40, struct.pack(">I", syms[f"n_{n.lower()}_l"]), f"id {i}: nome lungo '{ln}'"))
         ui.append(fixed(r + 48, struct.pack(">I", syms[f"n_{n.lower()}_s"]), f"id {i}: nome breve '{n}'"))
+    def opnd(h: str) -> str:                            # operandi: prototipi nel BSS (spostati), o byte di codice
+        return f"{B(int(h, 16)):08x}" if len(h) == 8 else h
     for addr, orig, new, what in INIT_FIX:
-        ui.append(fixed(addr, bytes.fromhex(new), what, orig))
-    ui.append(fixed(PAGE_HOOK, struct.pack(">HI", 0x4EB9, syms["comp_page_stub"]),
-                    "pagina SYN della FX track all'avvio: caselle A..G e init (jsr comp_page_stub)", PAGE_ORIG))
+        ui.append(fixed(C(addr), bytes.fromhex(opnd(new)), what, opnd(orig)))
+    page_orig = PAGE_ORIG[:4] + f"{B(int(PAGE_ORIG[4:], 16)):08x}"
+    ui.append(fixed(page_hook, struct.pack(">HI", 0x4EB9, syms["comp_page_stub"]),
+                    "pagina SYN della FX track all'avvio: caselle A..G e init (jsr comp_page_stub)", page_orig))
 
     spec = {
-        "name": "master-comp", "os": "1.41", "requires": ["modarea", "vparams"],
+        "name": "master-comp", "os": os_, "requires": ["modarea", "vparams"],
         "description": "Compressore sul master analogico (VCA del master) con l'algoritmo del "
                        "compressore in stile Digitakt; manopole THR ATK REL MUP RAT (0 = OFF) e misuratore GR "
                        "sulla pagina SYN della FX track; valori salvati nel kit del pattern (o globali con "
@@ -215,12 +213,12 @@ def main() -> None:
             {"section": 3, "addr": f"{MODAREA_IMG + CODE_BASE - MODAREA_RAM:#010X}", "len": len(blob),
              "append": True, "hex": blob.hex(), "ram": f"{CODE_BASE:#010x}",
              "what": "(area mod) routine del compressore + costanti del preset + stato + tabelline"},
-            {"section": 3, "addr": f"{HOOK:#010X}", "len": len(tramp),
-             "expect_sha256": sha(sec3[HOOK - LOAD:HOOK - LOAD + len(tramp)]), "hex": tramp.hex(),
-             "what": "trampolino: jsr comp_hook ; bra.w 0x40090562 (sostituisce limite e scrittura dei CV del master)"},
+            {"section": 3, "addr": f"{hook:#010X}", "len": len(tramp),
+             "expect_sha256": sha(sec3[hook - LOAD:hook - LOAD + len(tramp)]), "hex": tramp.hex(),
+             "what": f"trampolino: jsr comp_hook ; bra.w {hook_end:#010x} (sostituisce limite e scrittura dei CV del master)"},
         ] + ui,
     }
-    (HERE / "patch.json").write_text(json.dumps(spec, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    (HERE / osver.patch_file(os_)).write_text(json.dumps(spec, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     (REPO / "out" / "master-comp").mkdir(parents=True, exist_ok=True)
     (REPO / "out" / "master-comp" / "comp.lst").write_text(dis, encoding="utf-8")
     print(f"patch.json: {len(blob)} B in area mod a {CODE_BASE:#x}..{end:#x} (liberi ancora {FREE_END - end} B), "

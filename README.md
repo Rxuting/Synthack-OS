@@ -61,6 +61,17 @@ python tools/build/build.py --stock firmware/Syntakt_OS1.41.syx \
 
 Flash `out/synthack.syx` with Elektron Transfer (USB, *Drop* page). To go back, flash the stock OS the same way.
 
+**OS 1.42** (master compressor so far): generate the 1.42 patches, then build from `Syntakt_OS1.42.syx`.
+Addresses are moved from 1.41 by [tools/build/osver.py](tools/build/osver.py); on macOS/Linux the scripts use native
+`m68k-linux-gnu-*` or `m68k-elf-*` binutils.
+
+```sh
+for m in modarea vparams master-comp; do python mods/$m/make_patch.py --os 1.42; done
+python tools/build/build.py --stock firmware/Syntakt_OS1.42.syx mods/modarea mods/vparams mods/master-comp \
+    -o out/synthack-1.42.syx
+SYNTAKT_OS=1.42 python -m pytest tests/test_master_comp.py tests/test_modarea.py
+```
+
 ## Contributing
 
 Issues and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).

@@ -25,13 +25,16 @@
 | invariati). A ogni blocco comp_hook ne ricava le costanti come la Digitakt.
 | Tabelle della Digitakt (attacco, rilascio, ratio) in k_dt (dt_tables.inc, generato).
 
+        .ifndef BSS_D                           | make_patch.py --defsym BSS_D=...: spostamento del BSS
+        .equ    BSS_D,          0               | rispetto all'OS 1.41 (tools/build/osver.py)
+        .endif
         .equ    ADC_L,          0x80003C50
         .equ    ADC_R,          0x80003CD0
         .equ    EXP_K,          -356689313      | come la Digitakt: log -> ottave
         .equ    CV_MAX,         65535
         .equ    THR_K,          503316480       | soglia: thr = THR_K*(THR<<16) - THR_K
         .equ    MUP_K,          202017810       | makeup: mk = MUP_K*(MUP<<16) - MUP_K
-        .equ    FX_SLOTS,       0x41B9F950      | pagina "SYN / FX Drive" (oggetto in BSS)
+        .equ    FX_SLOTS,       0x41B9F950+BSS_D      | pagina "SYN / FX Drive" (oggetto in BSS)
         .equ    ID_DRIVE,       150
         .equ    N_PAR,          7               | THR ATK REL MUP RAT + GR (sola lettura) + ON
         .equ    IDX_ON,         6
@@ -40,17 +43,17 @@
         .equ    RAT_STEP,       0xFE0           | RAT: 9 posizioni (0 = OFF) su 0..0x7F00
         .equ    METER_FS,       18              | misuratore GR: barra piena = 18 dB
         .equ    METER_DECAY,    111848          | discesa ~20 dB/s (unita' 2^23/dB per blocco)
-        .equ    OBJS,           0x41B9FA24      | oggetti per-parametro in RAM (84 B, indice = id)
-        .equ    DRIVE_GFX,      0x41B9FA24 + 84*150 + 36   | disegno della manopola di DRIVE
-        .equ    UI_ROOT,        0x444E1334      | oggetto principale dell'interfaccia (singleton)
+        .equ    OBJS,           0x41B9FA24+BSS_D      | oggetti per-parametro in RAM (84 B, indice = id)
+        .equ    DRIVE_GFX,      OBJS + 84*150 + 36   | disegno della manopola di DRIVE
+        .equ    UI_ROOT,        0x444E1334+BSS_D      | oggetto principale dell'interfaccia (singleton)
         .equ    UI_DIRTY,       96              | +64 ViewController, +32 "da ridisegnare"
         .equ    REDRAW_BLOCKS,  24              | al massimo un ridisegno ogni 24 blocchi (~16 ms)
         | salvataggio: 2 parole libere del blocco "mixer esterno" del kit del pattern (L2 +82/+84;
         | L1 +40/+42), oppure le stesse del contenitore globale se SYN global (bit 2) e' attivo.
         .equ    KIT_PTR,        0x800030BC      | kit del pattern attivo (scritto da 0x400A1D18)
         .equ    KIT_BLK,        70              | blocco esterno nel kit L2 (+70..+87)
-        .equ    GLOB_BLK,       0x41B9D3B0      | blocco esterno nel contenitore globale
-        .equ    GLOBAL_FLAGS,   0x43BDE444      | bit 2 = SYN global
+        .equ    GLOB_BLK,       0x41B9D3B0+BSS_D      | blocco esterno nel contenitore globale
+        .equ    GLOBAL_FLAGS,   0x43BDE444+BSS_D      | bit 2 = SYN global
 
         .text
         .globl  comp_hook

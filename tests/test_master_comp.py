@@ -2,11 +2,12 @@
 
 Esegue sull'OS Syntakt patchato il tratto 0x4009053E..0x40090562 (trampolino + comp_hook) a ogni
 "blocco", con segnali finti sugli ADC 6/7, e le funzioni centrali dei parametri agganciate.
-Serve l'OS Syntakt 1.41 (saltato se manca).
+Serve l'OS Syntakt 1.41 (saltato se manca); SYNTAKT_OS=1.42 prova la patch generata per la 1.42.
 """
 
 import json
 import math
+import os
 import random
 import struct
 import sys
@@ -21,26 +22,31 @@ from unicorn.m68k_const import (UC_CPU_M68K_ANY, UC_M68K_REG_A3, UC_M68K_REG_A7,
                                 UC_M68K_REG_SR)
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(ROOT / "tools" / "emu"), str(ROOT / "tools" / "unpack"), str(ROOT / "mods" / "master-comp")]
+sys.path[:0] = [str(ROOT / "tools" / "emu"), str(ROOT / "tools" / "unpack"), str(ROOT / "tools" / "build"),
+                str(ROOT / "mods" / "master-comp")]
 import eft  # noqa: E402
+import osver  # noqa: E402
 from emac import UnicornEmac  # noqa: E402
 
-SY = ROOT / "firmware" / "Syntakt_OS1.41.syx"
-SPEC_F = ROOT / "mods" / "master-comp" / "patch.json"
+OS = os.environ.get("SYNTAKT_OS", "1.41")
+C = lambda a: osver.code(a, OS)                             # noqa: E731  indirizzi 1.41 -> OS provato
+B = lambda a: osver.bss(a, OS)                              # noqa: E731
+SY = ROOT / "firmware" / f"Syntakt_OS{OS}.syx"
+SPEC_F = ROOT / "mods" / "master-comp" / osver.patch_file(OS)
 pytestmark = pytest.mark.skipif(not (SY.exists() and SPEC_F.exists()), reason="OS Syntakt o patch assenti")
 
 LOAD = 0x4000_0400
-HOOK, AFTER = 0x4009_053E, 0x4009_0562
+HOOK, AFTER = C(0x4009_053E), C(0x4009_0562)
 ADC_L, ADC_R = 0x8000_3C50, 0x8000_3CD0
 HW, STACK, RET = 0x5000_2000, 0x5001_0000, 0x5000_8000
-FX_SLOTS = 0x41B9_F950
+FX_SLOTS = B(0x41B9_F950)
 KIT_PTR, KIT, KIT_BLK = 0x8000_30BC, 0x5000_4000, 70
-GLOB_BLK, GLOBAL_FLAGS = 0x41B9_D3B0, 0x43BD_E444
+GLOB_BLK, GLOBAL_FLAGS = B(0x41B9_D3B0), B(0x43BD_E444)
 WOFF = {"THR": 12, "ATK": 14, "REL": 2, "MUP": 8}      # parole nel blocco esterno
-UI_ROOT, UI = 0x444E_1334, 0x5000_A000
+UI_ROOT, UI = B(0x444E_1334), 0x5000_A000
 IDS = {"THR": 144, "ATK": 122, "REL": 91, "MUP": 101, "RAT": 127, "GR": 59, "COMP": 115}
 RAT_STEP = 0xFE0
-OBJS = 0x41B9_FA24
+OBJS = B(0x41B9_FA24)
 GET, SET, KIT_FN = 0x4000_D94A, 0x4000_DA32, 0x4000_D870
 REGS = [getattr(__import__("unicorn.m68k_const", fromlist=["x"]), f"UC_M68K_REG_{r}")
         for r in ("D0", "D2", "D4", "D5", "D6", "D7", "A0", "A1", "A2", "A4", "A5")]
@@ -59,15 +65,15 @@ class Machine:
         uc.mem_map(0x4000_0000, 0x0040_0000)
         uc.mem_write(LOAD, sec3)
         uc.mem_map(0x4600_0000, 0x1_0000)                      # area mod (dopo la rilocazione)
-        vp = json.loads((ROOT / "mods" / "vparams" / "patch.json").read_text(encoding="utf-8"))
+        vp = json.loads((ROOT / "mods" / "vparams" / osver.patch_file(OS)).read_text(encoding="utf-8"))
         for p in spec["patches"] + vp["patches"]:          # i parametri virtuali passano da vparams
             dst = int(p["ram"], 16) if p.get("append") else int(p["addr"], 16)
             uc.mem_write(dst, bytes.fromhex(p["hex"]))
         uc.mem_map(0x8000_0000, 0x1_0000)
         uc.mem_map(0x5000_0000, 0x2_0000)
-        uc.mem_map(0x41B9_D000, 0x7000)                        # globale, pagine, oggetti (BSS)
-        uc.mem_map(0x43BD_E000, 0x1000)                        # bit global
-        uc.mem_map(0x444E_1000, 0x1000)                        # puntatore all'interfaccia
+        uc.mem_map(B(0x41B9_D000), 0x7000)                     # globale, pagine, oggetti (BSS)
+        uc.mem_map(B(0x43BD_E000), 0x1000)                     # bit global
+        uc.mem_map(B(0x444E_1000), 0x1000)                     # puntatore all'interfaccia
         uc.mem_write(FX_SLOTS, struct.pack(">8i", 0, 0, 0, 0, 0, 0, 0, 150))
         uc.mem_write(KIT_PTR, struct.pack(">I", KIT if kit else 0))
         uc.mem_write(RET, b"\x4e\x75")
@@ -294,10 +300,10 @@ def test_page_stub_sets_the_knobs_at_boot(setup):
     m.uc.mem_write(FX_SLOTS, struct.pack(">8i", 0, 0, 0, 0, 0, 0, 0, 150))
     m.uc.reg_write(UC_M68K_REG_D0, 0x1234)
     m.call(int(spec["symbols"]["comp_page_stub"], 16), [])
-    assert list(struct.unpack(">8i", m.uc.mem_read(FX_SLOTS, 32))) == [144, 122, 91, 101, 127, 59, 115, 150]
+    assert list(struct.unpack(">8i", m.uc.mem_read(FX_SLOTS, 32))) == [*IDS.values(), 150]
     assert m.uc.reg_read(UC_M68K_REG_D0) == 0x1234
     sec = {int(p["addr"], 16): p for p in spec["patches"] if not p.get("append")}
-    assert 0x4019_5156 in sec                                   # al posto dell'ultimo clr.l delle caselle
+    assert C(0x4019_5156) in sec                                   # al posto dell'ultimo clr.l delle caselle
 
 
 def test_audio_block_leaves_the_page_alone(setup):
@@ -370,9 +376,9 @@ def test_init_copies_drive_knob_graphics(setup):
     drive = OBJS + 84 * 150 + 36
     m.uc.mem_write(drive, bytes(range(0xA0, 0xB0)))
     comp_init(m, spec)
-    for i in (144, 122, 91, 101):
-        assert bytes(m.uc.mem_read(OBJS + 84 * i + 36, 16)) == bytes(range(0xA0, 0xB0))
-    for i in (127, 59):                              # RAT e GR restano barre
+    for k in ("THR", "ATK", "REL", "MUP"):
+        assert bytes(m.uc.mem_read(OBJS + 84 * IDS[k] + 36, 16)) == bytes(range(0xA0, 0xB0))
+    for i in (IDS["RAT"], IDS["GR"]):                # RAT e GR restano barre
         assert bytes(m.uc.mem_read(OBJS + 84 * i + 36, 16)) == bytes(16)
 
 
@@ -502,4 +508,5 @@ def test_on_off_text_and_page_slot(setup):
     assert call_fmt(m, 0x100, "COMP") == "ON" and call_fmt(m, 0, "COMP") == "OFF"
     m.set("COMP", 0)
     m.block([0] * 32, [0] * 32, 1000, 1000)          # la casella resta nostra anche da spento
-    assert struct.unpack(">8i", m.uc.mem_read(FX_SLOTS, 32))[6] == 115
+    assert struct.unpack(">8i", m.uc.mem_read(FX_SLOTS, 32))[6] == IDS["COMP"]
+

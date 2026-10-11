@@ -6,6 +6,7 @@ risultante come farebbe il bootloader ed esegue da 0x400004B2 fino al ritorno ne
 """
 
 import json
+import os
 import struct
 import sys
 from pathlib import Path
@@ -23,13 +24,18 @@ sys.path[:0] = [str(ROOT / "tools" / "unpack"), str(ROOT / "tools" / "build")]
 import build  # noqa: E402
 import eft  # noqa: E402
 import lz  # noqa: E402
+import osver  # noqa: E402
 
-STOCK = ROOT / "firmware" / "Syntakt_OS1.41.syx"
+OS = os.environ.get("SYNTAKT_OS", "1.41")                   # SYNTAKT_OS=1.42: mod portate su 1.42
+PF = osver.patch_file(OS)
+STOCK = ROOT / "firmware" / f"Syntakt_OS{OS}.syx"
 MODS = [ROOT / "mods" / m for m in ("modarea", "vparams", "master-comp", "readable-values", "beat-repeat", "fx3")]
-pytestmark = pytest.mark.skipif(not STOCK.exists() or not all((m / "patch.json").exists() for m in MODS),
+if OS != "1.41":
+    MODS = [m for m in MODS if (m / PF).exists()]
+pytestmark = pytest.mark.skipif(not STOCK.exists() or not all((m / PF).exists() for m in MODS),
                                 reason="firmware stock o patch assenti")
 LOAD = 0x4000_0400
-LAYOUT = json.loads((ROOT / "mods" / "modarea" / "patch.json").read_text(encoding="utf-8"))["layout"]
+LAYOUT = json.loads((ROOT / "mods" / "modarea" / PF).read_text(encoding="utf-8"))["layout"]
 IMG, RAM, SIZE = (int(LAYOUT[k], 16) for k in ("img", "ram", "size"))
 
 
@@ -37,7 +43,7 @@ def area_image():
     """Area mod attesa: le patch accodate di tutte le mod alle loro posizioni, zeri negli spazi."""
     img = bytearray()
     for m in MODS:
-        for p in json.loads((m / "patch.json").read_text(encoding="utf-8"))["patches"]:
+        for p in json.loads((m / PF).read_text(encoding="utf-8"))["patches"]:
             if p.get("append"):
                 a = int(p["addr"], 16) - IMG
                 data = bytes.fromhex(p["hex"])

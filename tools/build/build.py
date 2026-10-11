@@ -46,10 +46,11 @@ import eft  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bootcheck  # noqa: E402
 import lz  # noqa: E402
+import osver  # noqa: E402
 
 LOAD_ADDR = 0x4000_0400                 # sezioni 3 e 7 si caricano qui (vedi docs/)
 PATCHABLE = {3, 7}
-STOCK_SHA256 = {"1.41": "8e2488f462c4a5656396a895f113bcd415e9900fa8709340dccf45d4cb9ed19e"}
+STOCK_SHA256 = osver.STOCK_SHA256
 
 
 class BuildError(RuntimeError):
@@ -78,8 +79,16 @@ class Patch:
         return self.offset + len(self.data)
 
 
+def spec_of(moddir: Path, os_version: str) -> dict:
+    """patch.json (OS 1.41) o patch.<versione>.json, se la mod e' stata generata per quell'OS."""
+    f = Path(moddir) / osver.patch_file(os_version)
+    if not f.exists():
+        f = Path(moddir) / "patch.json"
+    return json.loads(f.read_text(encoding="utf-8"))
+
+
 def load_mod(moddir: Path, os_version: str) -> list[Patch]:
-    spec = json.loads((Path(moddir) / "patch.json").read_text(encoding="utf-8"))
+    spec = spec_of(moddir, os_version)
     name = spec["name"]
     if spec.get("os") != os_version:
         raise BuildError(f"{name}: scritta per OS {spec.get('os')}, non per {os_version}")
@@ -104,10 +113,10 @@ def load_mod(moddir: Path, os_version: str) -> list[Patch]:
     return patches
 
 
-def mod_area(moddirs: list[Path]) -> dict | None:
+def mod_area(moddirs: list[Path], os_version: str) -> dict | None:
     """Disposizione dell'area mod compressa, se una delle mod (modarea) la dichiara."""
     for d in moddirs:
-        lay = json.loads((Path(d) / "patch.json").read_text(encoding="utf-8")).get("layout", {})
+        lay = spec_of(d, os_version).get("layout", {})
         if lay.get("compress") == "shlz":
             return {"img": int(lay["img"], 16), "size": int(lay["size"], 16)}
     return None
@@ -161,9 +170,9 @@ def build(stock: Path, moddirs: list[Path], out: Path, log=print) -> dict:
     version = info.version
     if STOCK_SHA256.get(version) != sha256(Path(stock).read_bytes()):
         raise BuildError(f"{stock}: non e' l'OS stock {version} atteso (impronta diversa)")
-    names = {json.loads((Path(d) / "patch.json").read_text(encoding="utf-8"))["name"] for d in moddirs}
+    names = {spec_of(d, version)["name"] for d in moddirs}
     for d in moddirs:
-        spec = json.loads((Path(d) / "patch.json").read_text(encoding="utf-8"))
+        spec = spec_of(d, version)
         missing = set(spec.get("requires", [])) - names
         if missing:
             raise BuildError(f"{spec['name']}: richiede anche {sorted(missing)}")
@@ -176,7 +185,7 @@ def build(stock: Path, moddirs: list[Path], out: Path, log=print) -> dict:
         original = {s: files[s].read_bytes() for s in needed}
         sections = {s: bytearray(b) for s, b in original.items()}
         apply_patches(sections, patches)
-        area = mod_area(moddirs)
+        area = mod_area(moddirs, version)
         image = None
         if area and 3 in sections and len(sections[3]) > area["img"] - LOAD_ADDR:
             sec = sections[3]
@@ -234,7 +243,7 @@ def build(stock: Path, moddirs: list[Path], out: Path, log=print) -> dict:
     manifest = {
         "os": version,
         "stock_sha256": STOCK_SHA256[version],
-        "mods": [json.loads((Path(d) / "patch.json").read_text(encoding="utf-8"))["name"] for d in moddirs],
+        "mods": [spec_of(d, version)["name"] for d in moddirs],
         "output": out.name,
         "output_sha256": sha256(out.read_bytes()),
         "boot_margin": margin,

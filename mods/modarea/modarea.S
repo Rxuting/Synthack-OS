@@ -14,7 +14,9 @@
 |   0xxxxxxx         -> x+1 byte letterali
 |   1lllllll hi lo   -> l+3 byte copiati da (hi<<8|lo) byte indietro
 
+        .ifndef IMG                             | make_patch.py --defsym IMG=... (per versione dell'OS)
         .equ    IMG,            0x40348000      | flusso compresso accodato alla sezione 3
+        .endif
         .equ    RAM,            0x46000000      | destinazione
         .equ    SIZE,           0x10000         | 64 KB: il resto oltre i dati viene azzerato
         .equ    MAGIC,          0x53484C5A      | "SHLZ"
